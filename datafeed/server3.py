@@ -21,6 +21,7 @@
 #from itertools import izip
 from random    import normalvariate, random
 from datetime  import timedelta, datetime
+from time import sleep
 
 import csv
 import dateutil.parser
@@ -217,7 +218,6 @@ def run(routes, host = '0.0.0.0', port = 8080):
     thread.start()
     print ('HTTP server started on port 8080')
     while True:
-        from time import sleep
         sleep(1)
     server.shutdown()
     server.start()

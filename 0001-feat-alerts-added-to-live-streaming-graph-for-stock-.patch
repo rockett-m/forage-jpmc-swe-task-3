@@ -1,0 +1,196 @@
+From 355ebe9ceff71294b77a664134a95fb23ea291c2 Mon Sep 17 00:00:00 2001
+From: Morgan Rockett <morgan.rockett@tufts.edu>
+Date: Tue, 17 Sep 2024 22:53:09 -0400
+Subject: [PATCH] feat: alerts added to live streaming graph for stock pairs
+ trading
+
+---
+ 0001-Move-python-files-to-datafeed-dir.patch | 23 ++++++++++
+ datafeed/server3.py                          |  2 +-
+ src/DataManipulator.ts                       | 37 +++++++++++-----
+ src/Graph.tsx                                | 44 +++++++++++++++-----
+ 4 files changed, 84 insertions(+), 22 deletions(-)
+ create mode 100644 0001-Move-python-files-to-datafeed-dir.patch
+
+diff --git a/0001-Move-python-files-to-datafeed-dir.patch b/0001-Move-python-files-to-datafeed-dir.patch
+new file mode 100644
+index 0000000..73e735d
+--- /dev/null
++++ b/0001-Move-python-files-to-datafeed-dir.patch
+@@ -0,0 +1,23 @@
++From 988093e37b2ec7e0215609bce5445569a1a33612 Mon Sep 17 00:00:00 2001
++From: Joe Ferrer <joe@theforage.com>
++Date: Wed, 1 Mar 2023 01:05:18 +1100
++Subject: [PATCH] Move python files to datafeed dir
++
++---
++ requirements.txt => datafeed/requirements.txt | 0
++ server.py => datafeed/server3.py              | 0
++ 2 files changed, 0 insertions(+), 0 deletions(-)
++ rename requirements.txt => datafeed/requirements.txt (100%)
++ rename server.py => datafeed/server3.py (100%)
++
++diff --git a/requirements.txt b/datafeed/requirements.txt
++similarity index 100%
++rename from requirements.txt
++rename to datafeed/requirements.txt
++diff --git a/server.py b/datafeed/server3.py
++similarity index 100%
++rename from server.py
++rename to datafeed/server3.py
++-- 
++2.43.0
++
+diff --git a/datafeed/server3.py b/datafeed/server3.py
+index 2de4e28..3e4f5f9 100644
+--- a/datafeed/server3.py
++++ b/datafeed/server3.py
+@@ -21,6 +21,7 @@
+ #from itertools import izip
+ from random    import normalvariate, random
+ from datetime  import timedelta, datetime
++from time import sleep
+ 
+ import csv
+ import dateutil.parser
+@@ -217,7 +218,6 @@ def run(routes, host = '0.0.0.0', port = 8080):
+     thread.start()
+     print ('HTTP server started on port 8080')
+     while True:
+-        from time import sleep
+         sleep(1)
+     server.shutdown()
+     server.start()
+diff --git a/src/DataManipulator.ts b/src/DataManipulator.ts
+index 7f62295..c3cc2e5 100644
+--- a/src/DataManipulator.ts
++++ b/src/DataManipulator.ts
+@@ -1,20 +1,37 @@
++// import { timeStamp } from 'console';
+ import { ServerRespond } from './DataStreamer';
+ 
++
+ export interface Row {
+-  stock: string,
+-  top_ask_price: number,
++  price_stock_1: number,
++  price_stock_2: number,
++  ratio: number,
+   timestamp: Date,
++  lower_bound: number,
++  upper_bound: number,
++  trigger_alert: number | undefined,
+ }
+ 
+ 
+ export class DataManipulator {
+-  static generateRow(serverResponds: ServerRespond[]) {
+-    return serverResponds.map((el: any) => {
+-      return {
+-        stock: el.stock,
+-        top_ask_price: el.top_ask && el.top_ask.price || 0,
+-        timestamp: el.timestamp,
+-      };
+-    })
++  static generateRow(serverResponds: ServerRespond[]) : Row {
++    const priceStock1 = (serverResponds[0].top_bid.price + serverResponds[0].top_ask.price) / 2;
++    const priceStock2 = (serverResponds[1].top_bid.price + serverResponds[1].top_ask.price) / 2;
++    const Ratio = priceStock1 / priceStock2;
++    const alertDelta = 0.05; // 0.10;
++    const lowerBound = 1.0 - alertDelta;
++    const upperBound = 1.0 + alertDelta;
++    // must map 1:1 to src/Graph.tsx : schema
++    // current server timestamp if curr resp datetime more recent than prev
++    return {
++      price_stock_1: priceStock1,
++      price_stock_2: priceStock2,
++      ratio: Ratio,
++      timestamp: (serverResponds[0].timestamp > serverResponds[1].timestamp) ?
++        serverResponds[0].timestamp : serverResponds[1].timestamp,
++      lower_bound: lowerBound,
++      upper_bound: upperBound,
++      trigger_alert: (Ratio < lowerBound || Ratio > upperBound) ? Ratio : undefined,
++    };
+   }
+ }
+diff --git a/src/Graph.tsx b/src/Graph.tsx
+index 277797d..cbab727 100644
+--- a/src/Graph.tsx
++++ b/src/Graph.tsx
+@@ -1,5 +1,6 @@
+ import React, { Component } from 'react';
+ import { Table } from '@finos/perspective';
++import { TableData } from '@finos/perspective';
+ import { ServerRespond } from './DataStreamer';
+ import { DataManipulator } from './DataManipulator';
+ import './Graph.css';
+@@ -23,10 +24,13 @@ class Graph extends Component<IProps, {}> {
+     const elem = document.getElementsByTagName('perspective-viewer')[0] as unknown as PerspectiveViewerElement;
+ 
+     const schema = {
+-      stock: 'string',
+-      top_ask_price: 'float',
+-      top_bid_price: 'float',
++      price_stock_1: 'float',
++      price_stock_2: 'float',
++      ratio: 'float', // 1.0 ratio is perfect correlation - no alpha
+       timestamp: 'date',
++      lower_bound: 'float', // fixed line at 1.0 - thresh
++      upper_bound: 'float', // fixed line at 1.0 + thresh
++      trigger_alert: 'float',
+     };
+ 
+     if (window.perspective && window.perspective.worker()) {
+@@ -36,23 +40,41 @@ class Graph extends Component<IProps, {}> {
+       // Load the `table` in the `<perspective-viewer>` DOM reference.
+       elem.load(this.table);
+       elem.setAttribute('view', 'y_line');
+-      elem.setAttribute('column-pivots', '["stock"]');
+       elem.setAttribute('row-pivots', '["timestamp"]');
+-      elem.setAttribute('columns', '["top_ask_price"]');
++      // don't need column-pivots as we are plotting ratio
++      // not stock1 and stock2 for each timestamp
++      elem.setAttribute('columns', '["ratio", "lower_bound", "upper_bound", "trigger_alert"]');
++      // aggregates fix duplicate data
+       elem.setAttribute('aggregates', JSON.stringify({
+-        stock: 'distinctcount',
+-        top_ask_price: 'avg',
+-        top_bid_price: 'avg',
+-        timestamp: 'distinct count',
++        price_stock_1: 'avg',
++        price_stock_2: 'avg',
++        ratio: 'avg',
++        timestamp: 'distinct_count',
++        lower_bound: 'avg',
++        upper_bound: 'avg',
++        trigger_alert: 'avg',
+       }));
+     }
+   }
+ 
++  // Errors to fix in the future
++  //
++  // add a pause / stop streaming data button
++  //
++  // make alert only red if above/below a threshold
++  // now it stays red until it crosses opposite threshold
++  //
++  // if below lower_bound,
++  // flash 'buy stock 1', 'short stock 2'
++  //
++  // if above upper_bound,
++  // flash 'short stock 1', 'buy stock 2'
++
+   componentDidUpdate() {
+     if (this.table) {
+-      this.table.update(
++      this.table.update([
+         DataManipulator.generateRow(this.props.data),
+-      );
++      ] as unknown as TableData);
+     }
+   }
+ }
+-- 
+2.43.0
+
